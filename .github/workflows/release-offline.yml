@@ -39,8 +39,11 @@ jobs:
       - name: Install Node.js dependencies
         run: cd src/observable && npm ci
 
+      - name: Install legacy plugin for offline build
+        run: cd src/observable && npm install -D @vitejs/plugin-legacy terser
+
       - name: Build Vue app (offline mode)
-        run: cd src/observable && npx vite build --base='./'
+        run: cd src/observable && npx vite build --config vite.offline.config.ts
 
       - name: Download and localize Google Fonts
         run: |

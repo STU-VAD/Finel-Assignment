@@ -40,7 +40,7 @@ jobs:
         run: cd src/observable && npm ci
 
       - name: Install legacy plugin for offline build
-        run: cd src/observable && npm install -D @vitejs/plugin-legacy terser
+        run: cd src/observable && npm install -D @vitejs/plugin-legacy@5 terser
 
       - name: Build Vue app (offline mode)
         run: cd src/observable && npx vite build --config vite.offline.config.ts

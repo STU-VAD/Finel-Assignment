@@ -1,0 +1,139 @@
+name: Release Offline Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/observable/package-lock.json
+
+      - name: Install Python dependencies
+        run: cd src/preprocess && uv sync
+
+      - name: Run Python preprocessing
+        run: cd src/preprocess && uv run python build.py
+
+      - name: Install Node.js dependencies
+        run: cd src/observable && npm ci
+
+      - name: Build Vue app (offline mode)
+        run: cd src/observable && npx vite build --base='./'
+
+      - name: Download and localize Google Fonts
+        run: |
+          set -e
+          DIST="src/observable/dist"
+          FONTS_DIR="$DIST/fonts"
+          mkdir -p "$FONTS_DIR"
+
+          # Download Google Fonts CSS (returns woff2 URLs)
+          AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0"
+          FONTS_CSS=$(curl -fsSL -H "User-Agent: $AGENT" \
+            "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&display=swap")
+
+          # Extract woff2 URLs and download each font file
+          FONT_URLS=$(echo "$FONTS_CSS" | grep -oP 'url\(https://[^)]+\.woff2\)' | sed 's/url(//;s/)//')
+          FILENAMES=""
+          for url in $FONT_URLS; do
+            fname=$(basename "$url")
+            curl -fsSL -o "$FONTS_DIR/$fname" "$url"
+            FILENAMES="$FILENAMES $fname"
+          done
+
+          # Extract font-weight pairs from the CSS
+          # Google Fonts CSS format:
+          #   @font-face {
+          #     font-family: 'JetBrains Mono';
+          #     font-style: normal;
+          #     font-weight: 300;
+          #     src: url(https://...) format('woff2');
+          #     unicode-range: U+...;
+          #   }
+          # We need to build a single @font-face with local src for each weight
+
+          # Build replacement CSS with local font references
+          LOCAL_CSS=""
+          # Parse each @font-face block
+          echo "$FONTS_CSS" | awk '
+            /@font-face/ { block=""; in_block=1 }
+            in_block { block = block $0 "\n" }
+            /\}/ && in_block {
+              in_block=0
+              # Extract weight
+              match(block, /font-weight: ([0-9]+)/, w)
+              weight = w[1]
+              # Extract woff2 URL
+              match(block, /url\((https:\/\/[^)]+\.woff2)\)/, u)
+              url = u[1]
+              # Get filename
+              n = split(url, parts, "/")
+              fname = parts[n]
+              # Output: weight filename
+              if (weight != "" && fname != "") {
+                print weight " " fname
+              }
+            }
+          ' | sort -u | while read weight fname; do
+            LOCAL_CSS="${LOCAL_CSS}@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:${weight};src:url('./fonts/${fname}') format('woff2');font-display:swap;}"
+          done
+
+          # Replace Google Fonts @import in index.html with local @font-face
+          # The built dist/index.html has all CSS inlined by Vite, so we need to
+          # replace the @import in the bundled CSS or in the HTML
+          # Actually, Vite inlines the CSS from App.vue into the bundle's CSS file.
+          # We need to find and replace the @import in the built CSS file.
+
+          CSS_FILE=$(find "$DIST/assets" -name "*.css" -type f | head -1)
+          if [ -n "$CSS_FILE" ]; then
+            # Replace the @import url(...) with local @font-face declarations
+            sed -i "s|@import url(https://fonts.googleapis.com[^;]*);|${LOCAL_CSS}|g" "$CSS_FILE"
+            echo "Replaced Google Fonts import in $CSS_FILE"
+          fi
+
+      - name: Create release archive
+        run: |
+          TAG="offline-$(date -u +'%Y%m%d-%H%M%S')"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+          cd src/observable/dist
+          zip -r "../../../climate-viz-${TAG}.zip" .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "离线演示版 ${{ env.TAG }}"
+          body: |
+            🖥️ **离线可视化演示包**
+
+            下载 `climate-viz-${{ env.TAG }}.zip`，解压后直接打开 `index.html` 即可，无需联网。
+
+            **包含内容：**
+            - 交互式 3D/2D 气候数据可视化
+            - CO₂ 浓度 + 温度异常数据（1979-2025）
+            - JetBrains Mono 字体已本地化
+          files: climate-viz-${{ env.TAG }}.zip
+          generate_release_notes: true
